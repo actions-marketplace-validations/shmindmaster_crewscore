@@ -14,9 +14,36 @@ install them, and do not compare their numbers to these.
 
 ## [Unreleased]
 
+No changes yet.
+
+---
+
+## [0.6.12] — 2026-09-16 — machine-output privacy and release hardening
+
 No scoring change. Ruleset remains `crewscore-hygiene@0.6.0`.
 
 ### Security
+
+- The corpus privacy self-check now inspects every 40-character window,
+  including exact-length inputs, unaligned matches, and the final possible
+  window, across raw, newline-normalized, whitespace-collapsed, and JSON-
+  serialized source forms in every generated artifact. The previous stride
+  sampled normalized text only and could miss both boundary cases and escaped
+  non-ASCII or multi-line content.
+- Owner auto-merge now queries current labels, draft state, author,
+  repositories, merge state, and head OID from the controller loaded from the
+  protected base revision at admission and again immediately before every
+  enable mutation. The write-capable workflow is now base-owned through
+  `pull_request_target`, checks out only the immutable base revision, and
+  serializes stop events behind in-flight arming without cancellation. Arming
+  is atomically bound to the event head. GitHub
+  exposes no equivalent atomic label/draft precondition, so the second read
+  narrows but cannot eliminate transient arming during the final API round
+  trip; `labeled` and `converted_to_draft` events withdraw an armed request.
+  The controller no longer performs irreversible direct merges, so an
+  already-clean PR is left for an explicit merge decision.
+- SARIF redaction is unconditional. The deprecated snippet compatibility flag
+  can affect JSON, HTML, and Markdown output, but never code-scanning output.
 
 - **Repository scans are contained to the requested root.** Discovery now
   resolves the scan root once and requires every candidate to resolve inside
@@ -39,6 +66,11 @@ No scoring change. Ruleset remains `crewscore-hygiene@0.6.0`.
 
 ### Added
 
+- CI now runs prompt-free CLI output contracts against the declared
+  minimum direct dependencies (`click==8.0.0`, `rich==13.0.0`).
+- Workflow provenance checks now cover job-level reusable workflows as well as
+  step-level actions, closing a pinning blind spot.
+
 - Refusals are reported instead of dropped: one stderr line per path, or one
   `{"skipped_unsafe_path": {...}}` object per path under `--json`, so an empty
   scan caused by containment is distinguishable from an empty repo. Skipped
@@ -60,6 +92,10 @@ No scoring change. Ruleset remains `crewscore-hygiene@0.6.0`.
   inspection.
 
 ### Fixed
+
+- Corpus `bytes` fields now count UTF-8 bytes instead of Python characters.
+- Distribution-pack generation now validates the primary X post after
+  templating, not only the optional thread posts.
 - **A hand-edited share fragment could claim coverage the control set cannot
   contain.** Reading a shared result trusted the length of the arrays in the
   fragment, so repeating a control ID inflated the count: a link carrying 8
@@ -100,13 +136,9 @@ No scoring change. Ruleset remains `crewscore-hygiene@0.6.0`.
   is deliberate fail-closed behavior, not a regression: it is what makes link
   cycles impossible.
 
----
+### Machine-output privacy
 
-## [0.6.12] — 2026-08-29 — machine outputs stop quoting the prompt
-
-No scoring change. Ruleset remains `crewscore-hygiene@0.6.0`.
-
-### Fixed
+#### Fixed
 
 - **Every machine output is prompt-free by default.** A regex match substring
   (up to 120 characters of the scanned prompt) was copied into
@@ -120,7 +152,7 @@ No scoring change. Ruleset remains `crewscore-hygiene@0.6.0`.
 - **HTML reports follow the same rule.** `--report` output is routinely
   uploaded as a CI artifact, so it is gated identically.
 
-### Added
+#### Added
 
 - `--include-snippets` on `test` and `scan`, plus an `include-snippets` Action
   input (default `"false"`, forwarded only when it is literally `"true"`). It
@@ -135,13 +167,13 @@ No scoring change. Ruleset remains `crewscore-hygiene@0.6.0`.
   contract, including the coding-agent-config JSON shape and the claim that
   configuration-smell `detail` strings quote nothing from the scanned file.
 
-### Changed
+#### Changed
 
 - The local terminal is unchanged: `crewscore test --explain` still prints the
   matched text, because it is explicitly requested and never leaves the
   machine.
 
-### Docs
+#### Docs
 
 - `docs/cli.md` documents the prompt-free contract, the per-surface table, and
   the deprecation. `docs/github-action.md` and `README.md` note it for CI

@@ -78,7 +78,50 @@ def _is_privileged(permissions: dict) -> bool:
 
 
 def _job_uses(job: dict) -> list[str]:
-    return [step.get("uses") for step in job.get("steps", []) or []]
+    """Return reusable-workflow and step-level action references for a job."""
+    uses = []
+    if job.get("uses"):
+        uses.append(job["uses"])
+    uses.extend(
+        step["uses"]
+        for step in job.get("steps", []) or []
+        if isinstance(step.get("uses"), str) and step["uses"]
+    )
+    return uses
+
+
+def _privileged_checkout_violations(workflow: dict) -> list[str]:
+    """Find PR-controlled or mutable checkouts in every write-capable job."""
+    violations = []
+    for job_name, job in (workflow.get("jobs") or {}).items():
+        if not _is_privileged(_effective_permissions(workflow, job)):
+            continue
+        for index, step in enumerate(job.get("steps", []) or []):
+            uses = str(step.get("uses", ""))
+            if not uses.startswith("actions/checkout@"):
+                continue
+            step_name = step.get("name", f"step {index + 1}")
+            prefix = f"{job_name}/{step_name}"
+            _, action_ref = _split_ref(uses)
+            options = step.get("with", {}) or {}
+            if not FULL_SHA_RE.match(action_ref):
+                violations.append(f"{prefix}: checkout action is not SHA-pinned")
+            if options.get("ref") != "${{ github.event.pull_request.base.sha }}":
+                violations.append(f"{prefix}: checkout ref is not the immutable base SHA")
+            if options.get("persist-credentials") is not False:
+                violations.append(f"{prefix}: checkout persists credentials")
+    return violations
+
+
+def test_job_uses_includes_reusable_workflow_references():
+    job = {
+        "uses": "example/ci/.github/workflows/test.yml@" + "a" * 40,
+        "steps": [
+            {"uses": "actions/checkout@" + "b" * 40},
+            {"run": "echo normal shell step"},
+        ],
+    }
+    assert _job_uses(job) == [job["uses"], job["steps"][0]["uses"]]
 
 
 def _controller_step(workflow: dict):
@@ -188,10 +231,8 @@ def test_each_action_resolves_to_one_sha_across_all_workflows():
 def test_automerge_controller_is_loaded_from_the_base_revision():
     """The confused-deputy fix: the PR must not supply its own judge.
 
-    Requiring the controller out of `GITHUB_WORKSPACE` resolves inside the PR
-    checkout, so a PR could ship a controller that approves anything. Every
-    reference to the controller in this workflow has to come from the
-    base-revision checkout instead.
+    The write-capable workflow itself and every controller reference must be
+    base-revision owned. The job must never check out or execute PR code.
     """
     workflow = _load(WORKFLOW_DIR / AUTOMERGE_WORKFLOW)
     _, step = _controller_step(workflow)
@@ -209,24 +250,45 @@ def test_automerge_controller_is_loaded_from_the_base_revision():
     assert f"{BASE_CHECKOUT_PATH}/{CONTROLLER_REL}" in paths
 
 
-def test_automerge_base_checkout_is_pinned_immutable_and_credential_free():
-    """The base checkout is the whole mitigation; check its properties."""
+def test_every_privileged_automerge_checkout_is_base_owned_and_credential_free():
+    """Every write-capable job must exclude PR code from every checkout."""
     workflow = _load(WORKFLOW_DIR / AUTOMERGE_WORKFLOW)
+    assert _privileged_checkout_violations(workflow) == []
+
+    job = workflow["jobs"]["enable-automerge"]
     checkouts = [
         step
-        for job in workflow["jobs"].values()
         for step in job.get("steps", [])
         if str(step.get("uses", "")).startswith("actions/checkout@")
     ]
-    base = [step for step in checkouts if step.get("with", {}).get("ref")]
-    assert len(base) == 1, "expected exactly one checkout pinned to a ref"
+    assert len(checkouts) == 1, "controller job must have exactly one base checkout"
+    assert checkouts[0]["with"]["path"] == BASE_CHECKOUT_PATH
 
-    step = base[0]
-    _, ref = _split_ref(step["uses"])
-    assert FULL_SHA_RE.match(ref), f"base checkout is not pinned to a SHA: {ref}"
-    assert step["with"]["ref"] == "${{ github.event.pull_request.base.sha }}"
-    assert step["with"]["path"] == BASE_CHECKOUT_PATH
-    assert step["with"]["persist-credentials"] is False
+
+def test_privileged_checkout_guard_catches_a_second_job_loading_pr_code():
+    workflow = {
+        "permissions": {"contents": "write", "pull-requests": "write"},
+        "jobs": {
+            "enable-automerge": {"steps": []},
+            "unsafe-head": {
+                "steps": [
+                    {
+                        "name": "Check out pull request head",
+                        "uses": "actions/checkout@" + "a" * 40,
+                        "with": {
+                            "ref": "${{ github.event.pull_request.head.sha }}",
+                            "persist-credentials": False,
+                        },
+                    }
+                ]
+            },
+        },
+    }
+
+    assert _privileged_checkout_violations(workflow) == [
+        "unsafe-head/Check out pull request head: "
+        "checkout ref is not the immutable base SHA"
+    ]
 
 
 def test_automerge_keeps_its_existing_mitigations():
@@ -234,6 +296,12 @@ def test_automerge_keeps_its_existing_mitigations():
     workflow = _load(WORKFLOW_DIR / AUTOMERGE_WORKFLOW)
     job = workflow["jobs"]["enable-automerge"]
     condition = job["if"]
+    events = workflow[True]
+    event_types = events["pull_request_target"]["types"]
+
+    assert "pull_request_target" in events
+    assert "pull_request" not in events
+    assert workflow["concurrency"]["cancel-in-progress"] is False
 
     permissions = _effective_permissions(workflow, job)
     assert permissions.get("contents") == "write"
@@ -244,25 +312,50 @@ def test_automerge_keeps_its_existing_mitigations():
 
     assert "github.repository_owner" in condition
     assert "head.repo.full_name" in condition
+    assert "github.event_name == 'pull_request_target'" in condition
     # The stop-switch and the sender check moved out of the job condition on
     # purpose: a job that is skipped cannot withdraw an armed request. Both now
     # reach the controller as arguments, so assert the wiring, not the filter.
     assert "no-automerge" not in condition
     assert "sender.login" not in condition
+    assert "converted_to_draft" in event_types
+    assert not any(str(step.get("uses", "")).startswith("./") for step in job["steps"])
     script_steps = [
         step for step in job["steps"] if str(step.get("uses", "")).startswith("actions/github-script@")
     ]
     assert len(script_steps) == 1
     script = script_steps[0]["with"]["script"]
-    assert "optOut:" in script and "no-automerge" in script
     assert "trustedSender:" in script and "github.event.sender.login == github.repository_owner" in script
+    # The wrapper must remain fail-closed when the protected-base controller
+    # is one revision behind during a controller rollout. The current
+    # controller still queries fresh draft and label state before acting.
+    assert "optOut:" in script and "github.event.pull_request.labels" in script
+    assert "github.event.pull_request.draft == false" in script
+    assert "repositoryOwner: context.repo.owner" in script
+    assert "repositoryNameWithOwner:" in script
+
+    rendered_script = re.sub(r"\$\{\{.*?\}\}", "false", script)
+    rendered_script = f"async function __githubScript() {{\n{rendered_script}\n}}\n"
+    syntax = subprocess.run(
+        [NODE, "--check", "-"],
+        input=rendered_script,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert syntax.returncode == 0, syntax.stderr
 
     controller = (ROOT / CONTROLLER_REL).read_text(encoding="utf-8")
     assert "expectedHeadOid" in controller
-    assert "pr.head.sha" in controller
+    assert "headRefOid" in controller
+    assert "isDraft" in controller
+    assert "labels(first: 100)" in controller
+    assert "author { login }" in controller
     assert "mergeMethod: SQUASH" in controller
     assert "disablePullRequestAutoMerge" in controller
     assert "trustedSender" in controller
+    assert "mergePullRequest" not in controller
+    assert "MergeOwnerPullRequest" not in controller
 
 
 @pytest.mark.skipif(
