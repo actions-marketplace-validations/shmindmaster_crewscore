@@ -8,8 +8,10 @@ honest changes.
 ```bash
 git clone https://github.com/shmindmaster/crewscore.git
 cd crewscore
-pip install -e ".[dev]"
-pytest -q
+python -m venv .venv
+# Activate .venv, then use its interpreter for installation and tests.
+python -m pip install -e ".[dev]"
+python -m pytest -q
 ```
 
 Runtime dependencies stay intentionally small: **click** and **rich**. Dev extra
@@ -19,9 +21,16 @@ Optional browser tests (static site):
 
 ```bash
 npm ci --include=dev
-npx playwright install chromium
+npx playwright install chromium firefox webkit
 npm run test:web
 ```
+
+Recreate a virtual environment if its base Python installation was removed;
+do not copy an old environment between interpreter installations. Use a new
+environment path if another task owns the existing one. Browser checks need
+the frozen npm install above; a stale `node_modules` can run a different
+Playwright version than the lockfile. Reduced motion belongs under
+`use.contextOptions`; the browser canary verifies it actually reaches the page.
 
 ## Commands you will use
 
@@ -71,7 +80,9 @@ the new text.
 Required status checks on `main` are the merge gate. Maintainer same-repo PRs
 enable **squash auto-merge** when checks pass. See [automation.md](automation.md).
 
-- Label **`no-automerge`** to force a manual merge.
+- Apply **`no-automerge`** before arming to block auto-merge. If it is applied
+  after arming, the resulting event asks the controller to withdraw the
+  request; the label is a stop signal, not a transactional lock.
 - Humans still own: public launch posts, Gate 0 strategy, scoring arithmetic
   changes, and choosing when to cut a PyPI tag.
 - The merge controller (`.github/scripts/owner-automerge.js`) is loaded from a
@@ -99,6 +110,33 @@ Treat these as the public surface while pre-1.0:
 - Generated `score-engine.js` parity with Python
 
 Breaking any of them needs a minor version bump and CHANGELOG entry.
+
+## Shared result links
+
+The browser checker can share a result as `#cs-result=<base64url>` appended to
+the current page. The fragment never leaves the device and is deliberately
+unsigned, so `assets/site.js` treats it as untrusted input.
+
+| Field | Meaning |
+| --- | --- |
+| `v` | Payload version. `2` is current; `1` and an absent `v` are the original shape and are accepted unchanged. |
+| `ruleset` | Must be a published ruleset id (`crewscore-hygiene@x.y.z`). |
+| `profile` | Must be a known profile. `coding_agent_config` is incompatible: those artifacts get configuration smells, not a written-control count. |
+| `total` | The canonical control count the share was made against (v2). |
+| `found`, `missing` | Control IDs. Together they must be a complete, disjoint partition of the canonical control set. |
+
+The decoder rejects, with a named reason, duplicate IDs, an ID listed as both
+found and missing, an incomplete partition, unknown IDs, an unknown or
+incompatible profile/ruleset pair, a declared total that does not follow from
+the partition, an unsupported version, and oversized fragments or arrays.
+Displayed counts are re-derived from the canonical control list, never from the
+arrays carried in the link. A rejected link shows the reason with a recovery
+action, renders no coverage number, and records no analytics event.
+
+A share made under a different published ruleset still opens — with the
+"cannot be edited or rescored here" notice — as long as its control IDs still
+form a valid partition of the current canonical set. A share whose control list
+no longer matches the current ruleset is rejected like any other invalid link.
 
 ## Media and demo assets
 

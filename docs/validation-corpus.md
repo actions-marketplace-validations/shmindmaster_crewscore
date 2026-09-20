@@ -6,7 +6,7 @@
 
 # Corpus validation: does CrewScore coverage separate production-labeled prompts from general-purpose ones?
 
-Validation ruleset `crewscore-hygiene@0.6.0` · package `0.6.11` · generated from the committed corpus snapshot.
+Validation ruleset `crewscore-hygiene@0.6.0` · package `0.6.12` · generated from the committed corpus snapshot.
 Reproducible command: `py scripts/validate_corpus.py`. This supersedes the withdrawn 1,368-prompt study.
 
 ## Corpora
@@ -138,5 +138,6 @@ here. A different corpus would move these numbers.
 Self-checks: 104 assertions passed. The run
 fails and writes nothing if any rate is unachievable at its own n, if
 a denominator is missing, if the interval and the p-value disagree, or
-if any 40-character run of input text appears in the output.
+if any 40-character run of raw, whitespace-normalized, or serialized
+input text appears in any generated output artifact.
 

@@ -14,9 +14,36 @@ install them, and do not compare their numbers to these.
 
 ## [Unreleased]
 
+No changes yet.
+
+---
+
+## [0.6.12] — 2026-09-16 — machine-output privacy and release hardening
+
 No scoring change. Ruleset remains `crewscore-hygiene@0.6.0`.
 
 ### Security
+
+- The corpus privacy self-check now inspects every 40-character window,
+  including exact-length inputs, unaligned matches, and the final possible
+  window, across raw, newline-normalized, whitespace-collapsed, and JSON-
+  serialized source forms in every generated artifact. The previous stride
+  sampled normalized text only and could miss both boundary cases and escaped
+  non-ASCII or multi-line content.
+- Owner auto-merge now queries current labels, draft state, author,
+  repositories, merge state, and head OID from the controller loaded from the
+  protected base revision at admission and again immediately before every
+  enable mutation. The write-capable workflow is now base-owned through
+  `pull_request_target`, checks out only the immutable base revision, and
+  serializes stop events behind in-flight arming without cancellation. Arming
+  is atomically bound to the event head. GitHub
+  exposes no equivalent atomic label/draft precondition, so the second read
+  narrows but cannot eliminate transient arming during the final API round
+  trip; `labeled` and `converted_to_draft` events withdraw an armed request.
+  The controller no longer performs irreversible direct merges, so an
+  already-clean PR is left for an explicit merge decision.
+- SARIF redaction is unconditional. The deprecated snippet compatibility flag
+  can affect JSON, HTML, and Markdown output, but never code-scanning output.
 
 - **Repository scans are contained to the requested root.** Discovery now
   resolves the scan root once and requires every candidate to resolve inside
@@ -39,6 +66,11 @@ No scoring change. Ruleset remains `crewscore-hygiene@0.6.0`.
 
 ### Added
 
+- CI now runs prompt-free CLI output contracts against the declared
+  minimum direct dependencies (`click==8.0.0`, `rich==13.0.0`).
+- Workflow provenance checks now cover job-level reusable workflows as well as
+  step-level actions, closing a pinning blind spot.
+
 - Refusals are reported instead of dropped: one stderr line per path, or one
   `{"skipped_unsafe_path": {...}}` object per path under `--json`, so an empty
   scan caused by containment is distinguishable from an empty repo. Skipped
@@ -52,8 +84,45 @@ No scoring change. Ruleset remains `crewscore-hygiene@0.6.0`.
   privileged jobs, one SHA per action, the auto-merge controller loaded from
   the base revision, and a fixture attack in which a pull request ships a
   controller that merges anything and is ignored.
+- **Shared browser result links are decoded and validated before anything is
+  shown.** A versioned decoder (`v2`; `v1` and an unversioned payload are
+  accepted unchanged) re-derives the control lists from the published canonical
+  control set, so every number on a shared result follows from the controls the
+  link actually lists. `assets/site.js` exposes `decodeSharedPayload` for
+  inspection.
 
 ### Fixed
+
+- Corpus `bytes` fields now count UTF-8 bytes instead of Python characters.
+- Distribution-pack generation now validates the primary X post after
+  templating, not only the optional thread posts.
+- **A hand-edited share fragment could claim coverage the control set cannot
+  contain.** Reading a shared result trusted the length of the arrays in the
+  fragment, so repeating a control ID inflated the count: a link carrying 8
+  distinct found controls rendered "10 of 23 written guardrails found" while
+  also reporting 15 missing. Displayed counts now come from the canonical
+  control list, never from `arr.length`.
+- **Impossible shared states are now rejected with a named reason** instead of
+  being rendered: `duplicate_id`, `overlap`, `incomplete_partition`,
+  `unknown_id`, `unknown_ruleset`, `unknown_profile`, `profile_incompatible`,
+  `impossible_total`, `unsupported_version`, `too_many_ids`,
+  `payload_too_large`, and `unreadable`. A rejected link shows the reason with
+  **Check my instructions** and **Dismiss this message**, renders no coverage
+  number or meter, and records no analytics event.
+- Share fragments and the control arrays inside them are bounded before
+  decoding, so an oversized link cannot make the page walk unbounded input.
+- `unknown_ruleset` checks membership, not shape. It previously accepted any
+  semver-shaped name, so `crewscore-hygiene@999.0.0` rendered its supplied
+  partition as a historical CrewScore result. Shared links are now validated
+  against the explicit list of published ruleset ids.
+- Opening a shared result records no `cs_site_view`. The event fired during
+  analytics init, before the decoder rendered anything, so the panel's "no
+  usage event was recorded for it" was false on `crewscore.ai` -- and only
+  there, since the transport exits early on every other host, which is why the
+  localhost browser tests could not see it.
+- The shared-result recovery button switches to the paste method before
+  focusing. The reader's last input method is restored from storage, so after
+  choosing upload or URL the button focused a hidden textarea and did nothing.
 
 - Diagnostics on stderr are greppable again. `err_console` hard-wrapped at the
   detected width (80 columns when stderr is not a tty), inserting real newlines
@@ -63,18 +132,13 @@ No scoring change. Ruleset remains `crewscore-hygiene@0.6.0`.
   change.
 
 ### Changed
-
 - A symlinked directory **inside** the root is no longer descended either. That
   is deliberate fail-closed behavior, not a regression: it is what makes link
   cycles impossible.
 
----
+### Machine-output privacy
 
-## [0.6.12] — 2026-08-29 — machine outputs stop quoting the prompt
-
-No scoring change. Ruleset remains `crewscore-hygiene@0.6.0`.
-
-### Fixed
+#### Fixed
 
 - **Every machine output is prompt-free by default.** A regex match substring
   (up to 120 characters of the scanned prompt) was copied into
@@ -88,7 +152,7 @@ No scoring change. Ruleset remains `crewscore-hygiene@0.6.0`.
 - **HTML reports follow the same rule.** `--report` output is routinely
   uploaded as a CI artifact, so it is gated identically.
 
-### Added
+#### Added
 
 - `--include-snippets` on `test` and `scan`, plus an `include-snippets` Action
   input (default `"false"`, forwarded only when it is literally `"true"`). It
@@ -103,13 +167,13 @@ No scoring change. Ruleset remains `crewscore-hygiene@0.6.0`.
   contract, including the coding-agent-config JSON shape and the claim that
   configuration-smell `detail` strings quote nothing from the scanned file.
 
-### Changed
+#### Changed
 
 - The local terminal is unchanged: `crewscore test --explain` still prints the
   matched text, because it is explicitly requested and never leaves the
   machine.
 
-### Docs
+#### Docs
 
 - `docs/cli.md` documents the prompt-free contract, the per-surface table, and
   the deprecation. `docs/github-action.md` and `README.md` note it for CI

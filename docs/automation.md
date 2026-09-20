@@ -25,7 +25,7 @@ agent opens owner same-repo PR
 | Control | Mechanism |
 | --- | --- |
 | Correctness | pytest matrix + browser + Action self-test |
-| Trust boundary | Self-hosted jobs only for owner same-repo PRs |
+| Trust boundary | Ephemeral GitHub-hosted runners; the write-capable reconciler is base-owned and never checks out PR code |
 | Landing | `allow_auto_merge` + `auto-merge-owner-prs.yml` |
 | Merge decision code | `.github/scripts/owner-automerge.js`, loaded from the **base revision** (`.github-base/`), never from the PR |
 | Reviews | **Not required** (`required_pull_request_reviews` off) |
@@ -43,16 +43,40 @@ the workflows are held to two rules:
    attached. The comment is what makes a SHA reviewable and is what Dependabot
    matches on when it proposes the next bump.
 2. **Code that decides whether a PR merges cannot come from that PR.**
-   `auto-merge-owner-prs.yml` checks out `pull_request.base.sha` into
-   `.github-base/` (`persist-credentials: false`) and requires the controller
-   from there. A PR can still change the controller, but only after the change
-   has landed and is covered by the branch ruleset.
+   The write-capable `auto-merge-owner-prs.yml` uses `pull_request_target`, so
+   GitHub loads the workflow from the protected base branch. Its only checkout
+   is `pull_request.base.sha` into `.github-base/`
+   (`persist-credentials: false`); it never checks out or executes PR code. A
+   PR can still propose a controller change, but that code cannot run with
+   write permission until it has landed behind the branch ruleset.
 
 `.github/dependabot.yml` runs the `github-actions` ecosystem weekly, which is
 the intended update path for those SHAs. `tests/test_workflow_provenance.py`
 enforces both rules, including a fixture attack: a PR that ships a controller
 merging anything, and an assertion that the workflow's decision path ignores
 it.
+
+The controller reads labels, draft state, ownership, repositories, merge
+state, and head OID twice: once at admission and again immediately before an
+enable mutation. `expectedHeadOid` makes the head check atomic. GitHub provides
+no conditional mutation for labels or draft state, so a change after the
+second read can still transiently arm auto-merge during the final API round
+trip. `labeled` and `converted_to_draft` events withdraw that request. The
+controller never performs a direct merge, so an already-clean PR is left for
+an explicit merge decision rather than risking an irreversible race.
+
+Accordingly, `no-automerge` is not a transactional promise that arming can
+never be observed. Its defensible contract is: a transition observed by the
+second admission read blocks arming; a later label/draft event withdraws an
+armed request; and this automation never directly completes a merge.
+
+Reconciliation events are serialized per PR with
+`cancel-in-progress: false`. If a stop event arrives while an arming mutation
+is already in flight, it waits, then reads current state and withdraws the
+request that completed ahead of it. A newer queued event may replace an older
+pending event under GitHub's concurrency semantics, but every replacement
+queries current labels and draft state, so a stop condition that remains
+present is still applied.
 
 ## Former "human gates" → automation status
 
@@ -64,7 +88,7 @@ it.
 | Category naming workshop | **Locked default** (SH-2388 Done) | "Configuration smells" + written-control checklist |
 | Ecosystem strategy essay | **Canceled** (SH-2385) | Ship integrations with CI only |
 | Manual Show HN copy shop | **Scripted drafts** | `python scripts/generate_dist_pack.py` |
-| Manual release tag after "review" | **Scripted** | `python scripts/cut_release.py --push` or Actions `Cut release tag` |
+| Manual release tag after "review" | **Scripted** | `python scripts/cut_release.py --push` or Actions `Cut release tag` with a verified exact-tag handoff |
 | Dimension reweight committee | **Corpus job** (SH-2386) | Automated hit-rate / separation report proposes change |
 | AgentLinter research workshop | **Scrape matrix** (SH-2384) | Scripted public docs matrix |
 | Live adversarial product | **Deferred** (SH-2344) | `export-eval` handoff only; no in-product live attacks |
@@ -80,17 +104,27 @@ python scripts/cut_release.py          # dry-run
 python scripts/cut_release.py --push   # annotated tag + push → release.yml
 ```
 
-Or: Actions → **Cut release tag** → `push: true` on `main`.
+Or: Actions → **Cut release tag** → `push: true` on `main`. GitHub does not
+start another workflow from a tag pushed with `GITHUB_TOKEN`, so the Actions
+path does not rely on the push event. A separate job with `actions: write` and
+read-only repository access verifies that the annotated tag peels to the exact
+`main` SHA from the tag-cut run, then dispatches `release.yml` at that tag with
+publishing enabled and passes the verified commit as `expected-sha`. The
+release workflow refuses a publishing dispatch unless GitHub resolved the tag
+to that same commit. The tag-cut job has `contents: write` but no Actions write
+permission; the dispatch job has Actions write but no repository write permission.
 
-Tag push runs full multi-OS verify + PyPI trusted publishing + GitHub Release
+A user-authenticated tag push, or the verified exact-tag Actions dispatch,
+runs full multi-OS verification, PyPI trusted publishing, and GitHub Release
 notes from CHANGELOG. **No long-lived PyPI token.**
 
 Release-time verification (not performed from a release-candidate branch):
 
 1. Confirm the annotated `vX.Y.Z` tag peels to the exact green `main` SHA.
-2. Confirm PyPI wheel/sdist metadata and the GitHub Release target that SHA.
-3. Confirm the release workflow moved floating Action tag `v2` to the same SHA.
-4. Regenerate the distribution pack from that checkout and retain its
+2. Confirm the release run used `refs/tags/vX.Y.Z`, not `main`.
+3. Confirm PyPI wheel/sdist metadata and the GitHub Release target that SHA.
+4. Confirm the release workflow moved floating Action tag `v2` to the same SHA.
+5. Regenerate the distribution pack from that checkout and retain its
    `manifest.json` plus `checksums.txt` as launch evidence.
 
 One-time (already documented in `release.yml`): PyPI trusted publisher binding
